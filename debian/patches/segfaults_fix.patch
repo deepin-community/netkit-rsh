@@ -1,0 +1,15 @@
+--- a/rcp/rcp.c
++++ b/rcp/rcp.c
+@@ -889,7 +889,11 @@
+ 	fprintf(fp, "%c", 0x01);
+ 	vfprintf(fp, fmt, ap);
+ 	fflush(fp);
+-	if (!iamremote)	vfprintf(stderr, fmt, ap);
++	if (!iamremote)	{
++		va_end(ap);
++		va_start(ap, fmt);
++		vfprintf(stderr, fmt, ap);
++	}
+ 
+ 	va_end(ap);
+ }

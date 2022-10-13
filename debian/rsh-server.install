@@ -1,0 +1,10 @@
+
+usr/sbin/in.rexecd
+usr/sbin/in.rlogind
+usr/sbin/in.rshd
+debian/checkrhosts  usr/sbin/
+
+debian/hosts.equiv  etc/
+debian/pam.d/rexec  etc/pam.d/
+debian/pam.d/rlogin etc/pam.d/
+debian/pam.d/rsh    etc/pam.d/

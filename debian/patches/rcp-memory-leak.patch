@@ -1,0 +1,77 @@
+Description: Fix memory leak in rcp
+Author: Hiroyuki YAMAMORI
+Forwarded: no
+Bug-Debian: 889029
+
+Index: netkit-rsh/rcp/rcp.c
+===================================================================
+--- netkit-rsh.orig/rcp/rcp.c	2018-12-24 09:14:27.701172862 +0100
++++ netkit-rsh/rcp/rcp.c	2018-12-24 09:15:42.601441555 +0100
+@@ -645,6 +645,8 @@
+ 	int ofd, setimes, targisdir;
+ 	off64_t size;
+ 	char *np, *vect[1], buf[BUFSIZ];
++	char *namebuf = NULL;
++	unsigned cursize = 0, nbase = 0;
+ 
+ #define	atime	tv[0]
+ #define	mtime	tv[1]
+@@ -666,8 +668,11 @@
+ 		targisdir = 1;
+ 	for (first = 1;; first = 0) {
+ 		cp = buf;
+-		if (read(rem, cp, 1) <= 0)
++		if (read(rem, cp, 1) <= 0) {
++			if (namebuf)
++				free(namebuf);
+ 			return;
++		}
+ 		if (*cp++ == '\n')
+ 			SCREWUP("unexpected <newline>");
+ 		do {
+@@ -687,6 +692,8 @@
+ 		}
+ 		if (buf[0] == 'E') {
+ 			(void)write(rem, "", 1);
++			if (namebuf)
++				free(namebuf);
+ 			return;
+ 		}
+ 
+@@ -741,17 +748,28 @@
+ 		if (*cp++ != ' ')
+ 			SCREWUP("size not delimited");
+ 		if (targisdir) {
+-			static char *namebuf;
+-			static int cursize;
+-			int need;
+-
+-			need = strlen(targ) + strlen(cp) + 250;
++			char *newbuf;
++			int need = strlen(targ) + strlen(cp) + 2;
+ 			if (need > cursize) {
+-				if (!(namebuf = malloc(need)))
++				need += 64;
++				if (!(newbuf = malloc(need))) {
+ 					error("out of memory\n");
++					exit(1);
++				}
++				if (namebuf) {
++					memcpy(newbuf, namebuf, nbase);
++					newbuf[nbase] = '\0';
++					free(namebuf);
++				} else {
++					strcpy(newbuf, targ);
++					if (*newbuf)
++						strcat(newbuf, "/");
++					nbase = strlen(newbuf);
++				}
++				namebuf = newbuf;
++				cursize = need;
+ 			}
+-			(void)snprintf(namebuf, need, "%s%s%s", targ,
+-			    *targ ? "/" : "", cp);
++			strcpy(namebuf + nbase, cp);
+ 			np = namebuf;
+ 		}
+ 		else

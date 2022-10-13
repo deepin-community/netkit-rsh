@@ -1,0 +1,91 @@
+Description: Debian-specific changes to the cmake build system
+Author: Christoph Biedl <debian.axhn@manchmal.in-ulm.de>
+Forwarded: not-needed
+Last-Update: 2018-11-25
+
+--- a/rcp/CMakeLists.txt
++++ b/rcp/CMakeLists.txt
+@@ -1,10 +1,10 @@
+ 
+ add_executable(
+-    rcp
++    netkit-rcp
+     rcp.c
+ )
+ install(
+-    TARGETS rcp
++    TARGETS netkit-rcp
+     DESTINATION ${BIN_DIR}
+     PERMISSIONS
+         SETUID
+@@ -15,4 +15,5 @@
+ install(
+     FILES rcp.1
+     DESTINATION ${MAN_DIR}/man1/
++    RENAME netkit-rcp.1
+ )
+--- a/rlogin/CMakeLists.txt
++++ b/rlogin/CMakeLists.txt
+@@ -1,11 +1,11 @@
+ 
+ add_executable(
+-    rlogin
++    netkit-rlogin
+     des_rw.c
+     rlogin.c
+ )
+ install(
+-    TARGETS rlogin
++    TARGETS netkit-rlogin
+     DESTINATION ${BIN_DIR}
+     PERMISSIONS
+         SETUID
+@@ -16,4 +16,5 @@
+ install(
+     FILES rlogin.1
+     DESTINATION ${MAN_DIR}/man1/
++    RENAME netkit-rlogin.1
+ )
+--- a/rsh/CMakeLists.txt
++++ b/rsh/CMakeLists.txt
+@@ -1,10 +1,10 @@
+ 
+ add_executable(
+-    rsh
++    netkit-rsh
+     rsh.c
+ )
+ install(
+-    TARGETS rsh
++    TARGETS netkit-rsh
+     DESTINATION ${BIN_DIR}
+     PERMISSIONS
+         SETUID
+@@ -15,4 +15,5 @@
+ install(
+     FILES rsh.1
+     DESTINATION ${MAN_DIR}/man1/
++    RENAME netkit-rsh.1
+ )
+--- a/rshd/CMakeLists.txt
++++ b/rshd/CMakeLists.txt
+@@ -6,7 +6,7 @@
+     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_PAM")
+     set(
+         LIBS
+-        ${LIBS} dl pam pam_misc
++        ${LIBS} pam pam_misc
+     )
+ endif()
+ 
+--- a/rexecd/CMakeLists.txt
++++ b/rexecd/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ 
+ if(USE_PAM)
+     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_PAM")
+-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -ldl -lpam -lpam_misc")
++    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lpam -lpam_misc")
+ endif()
+ 
+ if(USE_SHADOW)

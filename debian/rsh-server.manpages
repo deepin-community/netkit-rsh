@@ -1,0 +1,6 @@
+debian/checkrhosts.8
+debian/rhosts.5
+debian/tmp/usr/share/man/man8/in.rexecd.8
+debian/tmp/usr/share/man/man8/in.rshd.8
+debian/tmp/usr/share/man/man8/in.rshd.8
+debian/tmp/usr/share/man/man8/in.rlogind.8

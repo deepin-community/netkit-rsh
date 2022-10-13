@@ -1,0 +1,256 @@
+Description: Use cmake as build system
+Author: Christoph Biedl <debian.axhn@manchmal.in-ulm.de>
+Bug-Debian: https://bugs.debian.org/912127
+Last-Update: 2018-11-25
+
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,20 @@
++cmake_minimum_required(VERSION 3.7)
++project(netkit-rsh)
++
++set(BIN_DIR "${CMAKE_INSTALL_PREFIX}/bin")
++set(SBIN_DIR "${CMAKE_INSTALL_PREFIX}/sbin")
++set(MAN_DIR "${CMAKE_INSTALL_PREFIX}/share/man")
++
++set(USE_GLIBC 1)
++
++find_library(USE_CRYPT crypt REQUIRED)
++find_library(USE_PAM pam)
++find_library(USE_TERMCAP lncurses REQUIRED)
++
++add_subdirectory(rcp)
++add_subdirectory(rexec)
++add_subdirectory(rexecd)
++add_subdirectory(rlogin)
++add_subdirectory(rlogind)
++add_subdirectory(rsh)
++add_subdirectory(rshd)
+--- /dev/null
++++ b/rcp/CMakeLists.txt
+@@ -0,0 +1,18 @@
++
++add_executable(
++    rcp
++    rcp.c
++)
++install(
++    TARGETS rcp
++    DESTINATION ${BIN_DIR}
++    PERMISSIONS
++        SETUID
++        OWNER_WRITE OWNER_READ OWNER_EXECUTE
++        GROUP_READ GROUP_EXECUTE
++)
++
++install(
++    FILES rcp.1
++    DESTINATION ${MAN_DIR}/man1/
++)
+--- /dev/null
++++ b/rexec/CMakeLists.txt
+@@ -0,0 +1,14 @@
++
++add_executable(
++    rexec
++    rexec.c
++)
++install(
++    TARGETS rexec
++    DESTINATION ${BIN_DIR}
++)
++
++install(
++    FILES rexec.1
++    DESTINATION ${MAN_DIR}/man1/
++)
+--- /dev/null
++++ b/rexecd/CMakeLists.txt
+@@ -0,0 +1,47 @@
++
++if(USE_PAM)
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_PAM")
++    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -ldl -lpam -lpam_misc")
++endif()
++
++if(USE_SHADOW)
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_SHADOW")
++    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${LIBSHADOW}")
++endif()
++
++# -DRESTRICT_FTP if you want to deny all users in /etc/ftpusers to use rexecd
++#if(RESTRICT_FTP)
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DRESTRICT_FTP")
++#endif()
++
++add_executable(
++    in.rexecd
++    rexecd.c
++)
++install(
++    TARGETS in.rexecd
++    DESTINATION ${SBIN_DIR}
++)
++
++install(
++    FILES rexecd.8
++    DESTINATION ${MAN_DIR}/man8/
++    RENAME in.rexecd.8
++)
++install(
++    CODE "execute_process( \
++        COMMAND ${CMAKE_COMMAND} -E create_symlink \
++        in.rexecd.8 \$ENV{DESTDIR}${MAN_DIR}/man8/rexecd.8 \
++    )"
++)
++
++if(USE_PAM)
++install(
++    CODE "execute_process( \
++        COMMAND ${CMAKE_COMMAND} -E echo \" \
++You have chosen to use PAM as the authentication method\n\
++You should copy the rexec.pam file provided to /etc/pam.d\n\
++or if you know what you are doing, tailor it to your needs\
++    \")"
++)
++endif()
+--- /dev/null
++++ b/rlogin/CMakeLists.txt
+@@ -0,0 +1,19 @@
++
++add_executable(
++    rlogin
++    des_rw.c
++    rlogin.c
++)
++install(
++    TARGETS rlogin
++    DESTINATION ${BIN_DIR}
++    PERMISSIONS
++        SETUID
++        OWNER_WRITE OWNER_READ OWNER_EXECUTE
++        GROUP_READ GROUP_EXECUTE
++)
++
++install(
++    FILES rlogin.1
++    DESTINATION ${MAN_DIR}/man1/
++)
+--- /dev/null
++++ b/rsh/CMakeLists.txt
+@@ -0,0 +1,18 @@
++
++add_executable(
++    rsh
++    rsh.c
++)
++install(
++    TARGETS rsh
++    DESTINATION ${BIN_DIR}
++    PERMISSIONS
++        SETUID
++        OWNER_WRITE OWNER_READ OWNER_EXECUTE
++        GROUP_READ GROUP_EXECUTE
++)
++
++install(
++    FILES rsh.1
++    DESTINATION ${MAN_DIR}/man1/
++)
+--- /dev/null
++++ b/rshd/CMakeLists.txt
+@@ -0,0 +1,36 @@
++
++set(
++    LIBS
++)
++if(USE_PAM)
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_PAM")
++    set(
++        LIBS
++        ${LIBS} dl pam pam_misc
++    )
++endif()
++
++add_executable(
++    in.rshd
++    rshd.c
++)
++target_link_libraries(
++    in.rshd
++    ${LIBS}
++)
++install(
++    TARGETS in.rshd
++    DESTINATION ${SBIN_DIR}
++)
++
++install(
++    FILES rshd.8
++    DESTINATION ${MAN_DIR}/man8/
++    RENAME in.rshd.8
++)
++install(
++    CODE "execute_process( \
++        COMMAND ${CMAKE_COMMAND} -E create_symlink \
++        in.rshd.8 \$ENV{DESTDIR}${MAN_DIR}/man8/rshd.8 \
++    )"
++)
+--- /dev/null
++++ b/rlogind/CMakeLists.txt
+@@ -0,0 +1,55 @@
++
++set(
++    SRCS
++    auth.c
++    network.c
++    rlogind.c
++)
++if(USE_PAM)
++    set(
++        SRCS
++        ${SRCS}
++        sockconv.c
++    )
++endif()
++
++set(
++    LIBS
++    crypt
++    util
++)
++if(USE_PAM)
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_PAM")
++    set(
++        LIBS
++        ${LIBS}
++        dl
++        pam
++        pam_misc
++    )
++endif()
++
++add_executable(
++    in.rlogind
++    ${SRCS}
++)
++target_link_libraries(
++    in.rlogind
++    ${LIBS}
++)
++install(
++    TARGETS in.rlogind
++    DESTINATION ${SBIN_DIR}
++)
++
++install(
++    FILES rlogind.8
++    DESTINATION ${MAN_DIR}/man8/
++    RENAME in.rlogind.8
++)
++install(
++    CODE "execute_process( \
++        COMMAND ${CMAKE_COMMAND} -E create_symlink \
++        in.rlogind.8 \$ENV{DESTDIR}${MAN_DIR}/man8/rlogind.8 \
++    )"
++)

@@ -1,0 +1,10 @@
+--- netkit-rsh-0.17.orig/CMakeLists.txt
++++ netkit-rsh-0.17/CMakeLists.txt
+@@ -9,7 +9,6 @@
+ 
+ find_library(USE_CRYPT crypt REQUIRED)
+ find_library(USE_PAM pam)
+-find_library(USE_TERMCAP lncurses REQUIRED)
+ 
+ add_subdirectory(rcp)
+ add_subdirectory(rexec)

@@ -1,0 +1,8 @@
+debian-changes-0.17-17.patch
+segfaults_fix.patch
+use-cmake-as-buildsystem.patch
+use-cmake-as-buildsystem-debian-extras.patch
+rcp-memory-leak.patch
+fix-CVE-2018-20685-and-CVE-2019-6111.patch
+gcc9.patch
+cross.patch

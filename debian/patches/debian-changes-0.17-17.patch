@@ -1,0 +1,1891 @@
+Description: Debian source changes up to 0.17-17
+Author: Alberto Gonzalez Iniesta <agi@inittab.org>
+Last-Update: 2018-03-10
+
+--- a/rcp/pathnames.h
++++ b/rcp/pathnames.h
+@@ -37,4 +37,4 @@
+ #include <paths.h>
+ 
+ #define	_PATH_CP	"/bin/cp"
+-#define	_PATH_RSH	"/usr/bin/rsh"
++#define	_PATH_RSH	"/usr/bin/netkit-rsh"
+--- a/rcp/rcp.c
++++ b/rcp/rcp.c
+@@ -50,6 +50,9 @@
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
+ #include <sys/wait.h>
++#if defined(linux) && defined(FSUID_HACK)
++#include <sys/fsuid.h>
++#endif
+ #include <netinet/in.h>
+ #include <netinet/ip.h>
+ #include <dirent.h>
+@@ -64,6 +67,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <ctype.h>
++#include <stdint.h>
+ #include "pathnames.h"
+ 
+ #define	OPTIONS "dfprt"
+@@ -90,7 +94,7 @@
+ static int okname(const char *cp0);
+ static int susystem(const char *s);
+ static void source(int argc, char *argv[]);
+-static void rsource(char *name, struct stat *statp);
++static void rsource(char *name, struct stat64 *statp);
+ static void sink(int argc, char *argv[]);
+ static BUF *allocbuf(BUF *bp, int fd, int blksize);
+ static void nospace(void);
+@@ -262,9 +266,15 @@
+ 					nospace();
+ 				(void)snprintf(bp, len, "%s -t %s", cmd, targ);
+ 				host = thost;
+-					rem = rcmd(&host, port, pwd->pw_name,
++#if defined(linux) && defined(FSUID_HACK)
++				setfsuid(getuid());
++#endif
++					rem = rcmd_af(&host, port, pwd->pw_name,
+ 					    tuser ? tuser : pwd->pw_name,
+-					    bp, 0);
++					    bp, 0, AF_UNSPEC);
++#if defined(linux) && defined(FSUID_HACK)
++				setfsuid(geteuid());
++#endif
+ 				if (rem < 0)
+ 					exit(1);
+ #ifdef IP_TOS
+@@ -325,7 +335,14 @@
+ 		if (!(bp = malloc(len)))
+ 			nospace();
+ 		(void)snprintf(bp, len, "%s -f %s", cmd, src);
+-			rem = rcmd(&host, port, pwd->pw_name, suser, bp, 0);
++#if defined(linux) && defined(FSUID_HACK)
++		setfsuid(getuid());
++#endif
++			rem = rcmd_af(&host, port, pwd->pw_name, suser, bp, 0,
++				AF_UNSPEC);
++#if defined(linux) && defined(FSUID_HACK)
++		setfsuid(geteuid());
++#endif
+ 		(void)free(bp);
+ 		if (rem < 0) {
+ 			++errs;
+@@ -431,20 +448,20 @@
+ static void
+ source(int argc, char *argv[])
+ {
+-	struct stat stb;
++	struct stat64 stb;
+ 	static BUF buffer;
+ 	BUF *bp;
+-	off_t i;
++	off64_t i;
+ 	int x, readerr, f, amt;
+ 	char *last, *name, buf[BUFSIZ];
+ 
+ 	for (x = 0; x < argc; x++) {
+ 		name = argv[x];
+-		if ((f = open(name, O_RDONLY, 0)) < 0) {
++		if ((f = open64(name, O_RDONLY, 0)) < 0) {
+ 			error("rcp: %s: %s\n", name, strerror(errno));
+ 			continue;
+ 		}
+-		if (fstat(f, &stb) < 0)
++		if (fstat64(f, &stb) < 0)
+ 			goto notreg;
+ 		switch (stb.st_mode&S_IFMT) {
+ 
+@@ -482,7 +499,8 @@
+ 			}
+ 		}
+ 		(void)snprintf(buf, sizeof(buf),
+-		    "C%04o %ld %s\n", stb.st_mode&07777, stb.st_size, last);
++		    "C%04o %jd %s\n", stb.st_mode&07777,
++		    (intmax_t) stb.st_size, last);
+ 		(void)write(rem, buf, (int)strlen(buf));
+ 		if (response() < 0) {
+ 			(void)close(f);
+@@ -511,11 +529,11 @@
+ }
+ 
+ static void
+-rsource(char *name, struct stat *statp)
++rsource(char *name, struct stat64 *statp)
+ {
+ 	DIR *dirp;
+ 	struct dirent *dp;
+-	char *last, *vect[1], path[MAXPATHLEN];
++	char *last, *vect[1], *path;
+ 
+ 	if (!(dirp = opendir(name))) {
+ 		error("rcp: %s: %s\n", name, strerror(errno));
+@@ -527,17 +545,22 @@
+ 	else
+ 		last++;
+ 	if (pflag) {
+-		(void)snprintf(path, sizeof(path),
++		char buf[128];
++		(void)snprintf(buf, sizeof(buf),
+ 		    "T%ld 0 %ld 0\n", statp->st_mtime, statp->st_atime);
+-		(void)write(rem, path, (int)strlen(path));
++		(void)write(rem, buf, (int)strlen(buf));
+ 		if (response() < 0) {
+ 			closedir(dirp);
+ 			return;
+ 		}
+ 	}
+-	(void)snprintf(path, sizeof(path),
+-	    "D%04o %d %s\n", statp->st_mode&07777, 0, last);
++	if (asprintf(&path, "D%04o %d %s\n", statp->st_mode&07777, 0, last) < 0) {
++		error("out of memory\n");
++		closedir(dirp);
++		return;
++	}
+ 	(void)write(rem, path, (int)strlen(path));
++	free(path);
+ 	if (response() < 0) {
+ 		closedir(dirp);
+ 		return;
+@@ -547,13 +570,13 @@
+ 			continue;
+ 		if (!strcmp(dp->d_name, ".") || !strcmp(dp->d_name, ".."))
+ 			continue;
+-		if (strlen(name) + 1 + strlen(dp->d_name) >= MAXPATHLEN - 1) {
+-			error("%s/%s: name too long.\n", name, dp->d_name);
++		if (asprintf(&path, "%s/%s", name, dp->d_name) < 0) {
++			error("out of memory\n");
+ 			continue;
+ 		}
+-		(void)snprintf(path, sizeof(path), "%s/%s", name, dp->d_name);
+ 		vect[0] = path;
+ 		source(1, vect);
++		free(path);
+ 	}
+ 	closedir(dirp);
+ 	(void)write(rem, "E\n", 2);
+@@ -610,15 +633,17 @@
+ {
+ 	register char *cp;
+ 	static BUF buffer;
+-	struct stat stb;
++	struct stat64 stb;
+ 	struct timeval tv[2];
+ 	enum { YES, NO, DISPLAYED } wrerr;
+ 	BUF *bp;
+-	off_t i, j;
++	off64_t i;
++	off_t j;
+ 	char ch, *targ;
+ 	const char *why;
+ 	int amt, count, exists, first, mask, mode;
+-	int ofd, setimes, size, targisdir;
++	int ofd, setimes, targisdir;
++	off64_t size;
+ 	char *np, *vect[1], buf[BUFSIZ];
+ 
+ #define	atime	tv[0]
+@@ -637,7 +662,7 @@
+ 	if (targetshouldbedirectory)
+ 		verifydir(targ);
+ 	(void)write(rem, "", 1);
+-	if (stat(targ, &stb) == 0 && (stb.st_mode & S_IFMT) == S_IFDIR)
++	if (stat64(targ, &stb) == 0 && (stb.st_mode & S_IFMT) == S_IFDIR)
+ 		targisdir = 1;
+ 	for (first = 1;; first = 0) {
+ 		cp = buf;
+@@ -731,7 +756,7 @@
+ 		}
+ 		else
+ 			np = targ;
+-		exists = stat(np, &stb) == 0;
++		exists = stat64(np, &stb) == 0;
+ 		if (buf[0] == 'D') {
+ 			if (exists) {
+ 				if ((stb.st_mode&S_IFMT) != S_IFDIR) {
+@@ -752,7 +777,7 @@
+ 			}
+ 			continue;
+ 		}
+-		if ((ofd = open(np, O_WRONLY|O_CREAT, mode)) < 0) {
++		if ((ofd = open64(np, O_WRONLY|O_CREAT, mode)) < 0) {
+ bad:			error("rcp: %s: %s\n", np, strerror(errno));
+ 			continue;
+ 		}
+@@ -793,7 +818,7 @@
+ 		if (count != 0 && wrerr == NO &&
+ 		    write(ofd, bp->buf, count) != count)
+ 			wrerr = YES;
+-		if (ftruncate(ofd, size)) {
++		if (ftruncate64(ofd, size)) {
+ 			error("rcp: can't truncate %s: %s\n", np,
+ 			    strerror(errno));
+ 			wrerr = DISPLAYED;
+@@ -827,10 +852,10 @@
+ static BUF *
+ allocbuf(BUF *bp, int fd, int blksize)
+ {
+-	struct stat stb;
++	struct stat64 stb;
+ 	int size;
+ 
+-	if (fstat(fd, &stb) < 0) {
++	if (fstat64(fd, &stb) < 0) {
+ 		error("rcp: fstat: %s\n", strerror(errno));
+ 		return(0);
+ 	}
+--- a/rexecd/rexecd.c
++++ b/rexecd/rexecd.c
+@@ -89,6 +89,7 @@
+ 
+ #ifdef USE_PAM
+ #include <security/pam_appl.h>
++#include <security/pam_misc.h>
+ #endif
+ 
+ #define _PATH_FTPUSERS	      "/etc/ftpusers"
+@@ -99,10 +100,6 @@
+ struct from_host from_host;
+ #endif
+ 
+-int allow_severity = LOG_INFO;
+-int deny_severity = LOG_WARNING;
+-
+-
+ /*
+  * remote execute server:
+  *	username\0
+@@ -112,26 +109,36 @@
+  */
+ 
+ static void fatal(const char *);
+-static void doit(struct sockaddr_in *fromp);
+-static void getstr(char *buf, int cnt, const char *err);
++static void doit(struct sockaddr *fromp, socklen_t fromlen);
++static char *getstr(char *, size_t, const char *);
+ 
+ static const char *remote = NULL;
+ 
+ int
+ main(int argc, char **argv)
+ {
+-	struct sockaddr_in from;
++	struct sockaddr_storage from;
++	struct sockaddr *const fromp = (void *)&from;
+ 	socklen_t fromlen;
+ 
+ 	(void)argc;
+ 
+ 	fromlen = sizeof(from);
+  
+-	if (getpeername(0, (struct sockaddr *)&from, &fromlen) < 0) {
++	if (getpeername(0, fromp, &fromlen) < 0) {
+ 		fprintf(stderr, "rexecd: getpeername: %s\n", strerror(errno));
+ 		return 1;
+ 	}
+ 
++	switch (from.ss_family) {
++	case AF_INET:
++	case AF_INET6:
++		break;
++	default:
++		write(0, "\1Dysfunctional family detected.\n", 32);
++		return 1;
++	}
++
+ 	openlog(argv[0], LOG_PID, LOG_DAEMON);
+ 
+ #ifdef	TCP_WRAPPER
+@@ -142,28 +149,29 @@
+ 	remote = hosts_info(&from_host);
+ #else
+ 	{
+-	struct hostent *h = gethostbyaddr((const char *)&from.sin_addr,
+-					  sizeof(struct in_addr),
+-					  AF_INET);
+-	if (!h || !h->h_name) {
++	char hbuf[NI_MAXHOST];
++
++	if (getnameinfo(fromp, fromlen,
++			hbuf, sizeof(hbuf), NULL, 0, NI_NAMEREQD)) {
+ 		write(0, "\1Where are you?\n", 16);
+ 		return 1;
+ 	}
+ 	/* Be advised that this may be utter nonsense. */
+-	remote = strdup(h->h_name);
++	remote = strdup(hbuf);
+ 	}
+ #endif
+-	syslog(allow_severity, "connect from %.128s", remote);
+-	doit(&from);
++	doit(fromp, fromlen);
+ 	return 0;
+ }
+ 
++#ifndef USE_PAM
+ char	username[20] = "USER=";
+ char	homedir[64] = "HOME=";
+ char	shell[64] = "SHELL=";
+ char	path[sizeof(_PATH_DEFPATH) + sizeof("PATH=")] = "PATH=";
+ char	*envinit[] =
+ 	    {homedir, shell, path, username, 0};
++#endif
+ char	**myenviron;
+ 
+ #ifdef USE_PAM
+@@ -178,6 +186,8 @@
+   struct pam_response *reply = NULL;
+   int size = sizeof(struct pam_response);
+ 
++  (void) appdata_ptr;
++
+   #define GET_MEM if (reply) realloc(reply, size); else reply = malloc(size); \
+   if (!reply) return PAM_CONV_ERR; \
+   size += sizeof(struct pam_response)
+@@ -221,9 +231,9 @@
+ 
+ 
+ static void
+-doit(struct sockaddr_in *fromp)
++doit(struct sockaddr *fromp, socklen_t fromlen)
+ {
+-	char cmdbuf[ARG_MAX+1];
++	char *cmdbuf;
+ 	char user[16], pass[16];
+ 	struct passwd *pwd;
+ 	int s = -1;
+@@ -273,7 +283,13 @@
+  We must connect back to the client here if a port was provided. KRH
+ */
+ 	if (port != 0) {
+-		s = socket(AF_INET, SOCK_STREAM, 0);
++		const int family = fromp->sa_family;
++		union {
++			struct sockaddr_in6 in6;
++			struct sockaddr_in in;
++		} *const u = (void *)fromp;
++
++		s = socket(family, SOCK_STREAM, 0);
+ 		if (s < 0)
+ 			exit(1);
+ 
+@@ -283,36 +299,43 @@
+ 			exit(1);
+ #endif
+ 		alarm(60);
+-		fromp->sin_port = htons(port);
+-		if (connect(s, (struct sockaddr *)fromp, sizeof (*fromp)) < 0)
++		port = htons(port);
++		if (family == AF_INET6)
++			u->in6.sin6_port = port;
++		else
++			u->in.sin_port = port;
++		if (connect(s, fromp, fromlen) < 0)
+ 			exit(1);
+ 		alarm(0);
+ 	}
+ 
+ 	getstr(user, sizeof(user), "username too long\n");
+ 	getstr(pass, sizeof(pass), "password too long\n");
+-	getstr(cmdbuf, sizeof(cmdbuf), "command too long\n");
++#ifdef ARG_MAX
++	cmdbuf = getstr(0, ARG_MAX + 1, "command too long\n");
++#else
++	cmdbuf = getstr(0, 0, "command too long\n");
++#endif
+ #ifdef USE_PAM
+-       #define PAM_BAIL if (pam_error != PAM_SUCCESS) { \
+-	       pam_end(pamh, pam_error); exit(1); \
+-       }
+-       PAM_username = user;
+-       PAM_password = pass;
+-       pam_error = pam_start("rexec", PAM_username, &PAM_conversation,&pamh);
+-       PAM_BAIL;
+-       pam_error = pam_authenticate(pamh, 0);
+-       PAM_BAIL;
+-       pam_error = pam_acct_mgmt(pamh, 0);
+-       PAM_BAIL;
+-       pam_error = pam_setcred(pamh, PAM_ESTABLISH_CRED);
+-       PAM_BAIL;
+-       pam_end(pamh, PAM_SUCCESS);
+-       /* If this point is reached, the user has been authenticated. */
+-       setpwent();
+-       pwd = getpwnam(user);
+-       endpwent();
++	#define PAM_BAIL if (pam_error != PAM_SUCCESS) { \
++		pam_end(pamh, pam_error); exit(1); \
++	}
++	PAM_username = user;
++	PAM_password = pass;
++	pam_error = pam_start("rexec", PAM_username, &PAM_conversation,&pamh);
++	PAM_BAIL;
++	pam_error = pam_authenticate(pamh, 0);
++	PAM_BAIL;
++	pam_error = pam_acct_mgmt(pamh, 0);
++	PAM_BAIL;
++	pam_error = pam_setcred(pamh, PAM_ESTABLISH_CRED);
++	PAM_BAIL;
++	/* If this point is reached, the user has been authenticated. */
++	setpwent();
++	pwd = getpwnam(user);
++	endpwent();
+ #else /* !USE_PAM */
+-       /* All of the following issues are dealt with in the PAM configuration
++	/* All of the following issues are dealt with in the PAM configuration
+ 	  file, so put all authentication/priviledge checks before the
+ 	  corresponding #endif below. */
+ 
+@@ -375,10 +398,6 @@
+ 	/* Log successful attempts. */
+ 	syslog(LOG_INFO, "login from %.128s as %s", remote, user);
+ 
+-	if (chdir(pwd->pw_dir) < 0) {
+-		fatal("No remote directory.\n");
+-	}
+-
+ 	write(2, "\0", 1);
+ 	if (port) {
+ 		/* If we have a port, dup STDERR on that port KRH */
+@@ -410,11 +429,32 @@
+ 		exit(1);
+ 	}
+ 
++	if (chdir(pwd->pw_dir) < 0) {
++		fatal("No remote directory.\n");
++	}
++
++#ifdef USE_PAM
++	pam_misc_setenv(pamh, "PATH", _PATH_DEFPATH, 1);
++	PAM_BAIL;
++	pam_misc_setenv(pamh, "HOME", pwd->pw_dir, 1);
++	PAM_BAIL;
++	pam_misc_setenv(pamh, "SHELL", theshell, 1);
++	PAM_BAIL;
++	pam_misc_setenv(pamh, "USER", pwd->pw_name, 1);
++	PAM_BAIL;
++	myenviron = pam_getenvlist(pamh);
++	if (!myenviron) {
++		fprintf(stderr, "pam_misc_copy_env returned NULL\n");
++		exit(1);
++	}
++	pam_end(pamh, PAM_SUCCESS);
++#else
+ 	strcat(path, _PATH_DEFPATH);
+ 	myenviron = envinit;
+ 	strncat(homedir, pwd->pw_dir, sizeof(homedir)-6);
+ 	strncat(shell, theshell, sizeof(shell)-7);
+ 	strncat(username, pwd->pw_name, sizeof(username)-6);
++#endif
+ 	cp2 = strrchr(theshell, '/');
+ 	if (cp2) cp2++;
+ 	else cp2 = theshell;
+@@ -439,18 +479,46 @@
+ 	exit(1);
+ }
+ 
+-static void
+-getstr(char *buf, int cnt, const char *err)
++static char *
++getstr(char *buf, size_t cnt, const char *err)
+ {
+-	char c;
++	char *p;
++	char *end;
++	size_t len;
++
++	end = p = buf;
++	len = cnt;
++	if (p) {
++		end += len;
++		goto read;
++	}
++	if (!len)
++		len = 64;
++	goto alloc;
+ 
+ 	do {
+-		if (read(0, &c, 1) != 1)
+-			exit(1);
+-		*buf++ = c;
+-		if (--cnt <= 0) {
+-			fatal(err);
++		if (p == end) {
++			size_t n;
++
++			if (cnt || len * 2 < len) {
++				fatal(err);
++				exit(1);
++			}
++			len *= 2;
++alloc:
++			n = p - buf;
++			buf = realloc(buf, len);
++			if (!buf) {
++				fatal("out of memory");
++				exit(1);
++			}
++			p = buf + n;
++			end = buf + len;
+ 		}
+-	} while (c != 0);
++read:
++		if (read(0, p, 1) != 1)
++			exit(1);
++	} while (*p++);
++	return buf;
+ }
+ 
+--- a/rlogin/rlogin.1
++++ b/rlogin/rlogin.1
+@@ -40,10 +40,11 @@
+ .Nd remote login
+ .Sh SYNOPSIS
+ .Ar rlogin
+-.Op Fl 8EKLdx
++.Op Fl 8EKLd
+ .Op Fl e Ar char
+-.Op Fl k Ar realm
++.Op Fl i Ar identity
+ .Op Fl l Ar username
++.Op Fl p Ar port
+ .Ar host
+ .Sh DESCRIPTION
+ .Nm Rlogin
+@@ -64,6 +65,19 @@
+ parity bits are stripped except when the remote side's stop and start
+ characters are other than
+ ^S/^Q .
++.It Fl i
++The
++.Fl i
++option specifies the local user name to use for authentication with the remote
++.Nm rlogind
++server.  This overrides the default which is the name of the user invoking
++.Nm rlogin .
++.It Fl l
++The
++.Fl l
++option specifies the name of the remote user to login as.  This overrides the
++default which is the name of the user invoking
++.Nm rlogin .
+ .It Fl E
+ The
+ .Fl E
+@@ -74,7 +88,8 @@
+ .It Fl K
+ The
+ .Fl K
+-option turns off all Kerberos authentication.
++option turns off all Kerberos authentication.  This option has no effect since
++Kerberos authentication is not available in this version.
+ .It Fl L
+ The
+ .Fl L
+@@ -94,25 +109,12 @@
+ ``~'' by default.
+ This specification may be as a literal character, or as an octal
+ value in the form \ennn.
+-.It Fl k
++.It Fl p
+ The
+-.FL k
+-option requests rlogin to obtain tickets for the remote host
+-in realm
+-.Ar realm
+-instead of the remote host's realm as determined by
+-.Xr krb_realmofhost  3  .
+-.It Fl x
+-The
+-.Fl x
+-option turns on
+-.Tn DES
+-encryption for all data passed via the
+-rlogin session.
+-This may impact response time and
+-.Tn CPU
+-utilization, but provides
+-increased security.
++.Fl p
++option specifies the port to connect to.  This overrides the default
++which is
++.Nm login .
+ .El
+ .Pp
+ A line of the form ``<escape char>.'' disconnects from the remote host.
+@@ -129,35 +131,6 @@
+ is transparent.
+ Flow control via ^S/^Q and flushing of input and output on interrupts
+ are handled properly.
+-.Sh KERBEROS AUTHENTICATION
+-Each user may have a private authorization list in the file
+-.Pa .klogin
+-in their home directory.
+-Each line in this file should contain a Kerberos principal name of the
+-form
+-.Ar principal.instance@realm  .
+-If the originating user is authenticated to one of the principals named
+-in
+-.Pa .klogin ,
+-access is granted to the account.
+-The principal
+-.Ar accountname.@localrealm
+-is granted access if
+-there is no
+-.Pa .klogin
+-file.
+-Otherwise a login and password will be prompted for on the remote machine
+-as in
+-.Xr login  1  .
+-To avoid certain security problems, the
+-.Pa .klogin
+-file must be owned by
+-the remote user.
+-.Pp
+-If Kerberos authentication fails, a warning message is printed and the
+-standard Berkeley
+-.Nm rlogin
+-is used instead.
+ .Sh ENVIRONMENT
+ The following environment variable is utilized by
+ .Nm rlogin :
+@@ -166,10 +139,7 @@
+ Determines the user's terminal type.
+ .El
+ .Sh SEE ALSO
+-.Xr rsh 1 ,
+-.Xr kerberos 3 ,
+-.Xr krb_sendauth 3 ,
+-.Xr krb_realmofhost 3
++.Xr rsh 1
+ .Sh HISTORY
+ The
+ .Nm rlogin
+--- a/rlogin/rlogin.c
++++ b/rlogin/rlogin.c
+@@ -66,6 +66,9 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <string.h>
++#if defined(linux) && defined(FSUID_HACK)
++#include <sys/fsuid.h>
++#endif
+ 
+ /*
+  * rlogin has problems with urgent data when logging into suns which
+@@ -180,9 +183,12 @@
+ 
+ 	long omask;
+ 	int argoff, ch, dflag, one, uid;
++	int port;
+ 	char *host, *p, *user, term[1024];
+ 	const char *t;
+ 	char *null = NULL;
++	char *localname = NULL;
++	const char *serv = "login";
+ 
+ 	argoff = dflag = 0;
+ 	one = 1;
+@@ -193,7 +199,8 @@
+ 	else
+ 		p = argv[0];
+ 
+-	if (strcmp(p, "rlogin"))
++/* Modified for Debian by agi@inittab.org to allow calling rlogin as netkit-rlogin */
++	if (strcmp(p, "rlogin") && strcmp(p, "netkit-rlogin"))
+ 		host = p;
+ 
+ 	/* handle "rlogin host flags" */
+@@ -202,7 +209,9 @@
+ 		argoff = 1;
+ 	}
+ 
+-#define	OPTIONS	"8EKLde:l:"
++	uid = getuid();
++
++#define	OPTIONS	"8EKLde:i:l:p:"
+ 	while ((ch = getopt(argc - argoff, argv + argoff, OPTIONS)) != EOF)
+ 		switch(ch) {
+ 		case '8':
+@@ -222,9 +231,20 @@
+ 		case 'e':
+ 			escapechar = getescape(optarg);
+ 			break;
++		case 'i':
++			localname = optarg;
++			break;
+ 		case 'l':
+ 			user = optarg;
+ 			break;
++		case 'p':
++			serv = optarg;
++			/* This isn't really needed
++			if (uid) {
++				fprintf(stderr, "rlogin: -p requires root privilege\n");
++				exit(1);
++			}*/
++			break;
+ 		case '?':
+ 		default:
+ 			usage();
+@@ -240,19 +260,33 @@
+ 	if (*argv)
+ 		usage();
+ 
+-	if (!(pw = getpwuid(uid = getuid()))) {
++	if (!(pw = getpwuid(uid))) {
+ 		fprintf(stderr, "rlogin: unknown user id.\n");
+ 		exit(1);
+ 	}
+ 	if (!user)
+ 		user = pw->pw_name;
+ 
+-	sp = NULL;
+-	if (sp == NULL)
+-		sp = getservbyname("login", "tcp");
++	if (localname) {
++		if (uid) {
++			fprintf(stderr, "rlogin: -i requires root privilege\n");
++			exit(1);
++		}
++	} else {
++		localname = pw->pw_name;
++	}
++
++	sp = getservbyname(serv, "tcp");
+ 	if (sp == NULL) {
+-		fprintf(stderr, "rlogin: login/tcp: unknown service.\n");
+-		exit(1);
++		unsigned long u;
++		u = strtoul(serv, &p, 0);
++		if (!*serv || *p || (u == ULONG_MAX && errno == ERANGE)) {
++			fprintf(stderr, "rlogin: %s/tcp: unknown service.\n", serv);
++			exit(1);
++		}
++		port = htons(u);
++	} else {
++		port = sp->s_port;
+ 	}
+ 
+ 	t = getenv("TERM");
+@@ -279,7 +313,13 @@
+ 	/* will use SIGUSR1 for window size hack, so hold it off */
+ 	omask = sigblock(sigmask(SIGURG) | sigmask(SIGUSR1));
+ 
+-	rem = rcmd(&host, sp->s_port, pw->pw_name, user, term, 0);
++#if defined(linux) && defined(FSUID_HACK)
++	setfsuid(getuid());
++#endif
++	rem = rcmd_af(&host, port, localname, user, term, 0, AF_UNSPEC);
++#if defined(linux) && defined(FSUID_HACK)
++	setfsuid(geteuid());
++#endif
+ 
+ 	if (rem < 0) exit(1);
+ 
+@@ -420,7 +460,7 @@
+ void
+ catch_child(int ignore)
+ {
+-	union wait status;
++	int status;
+ 	int pid;
+ 
+ 	(void)ignore;
+@@ -431,7 +471,7 @@
+ 			return;
+ 		/* if the child (reader) dies, just quit */
+ 		if (pid < 0 || (pid == childpid && !WIFSTOPPED(status)))
+-			done((int)(status.w_termsig | status.w_retcode));
++			done((int)(WTERMSIG(status) | WEXITSTATUS(status)));
+ 	}
+ 	/* NOTREACHED */
+ }
+@@ -760,7 +800,11 @@
+ 		break;
+ 	  case 1:
+                 /* turn off output mappings */
++#if defined(__GNU__) && !defined(OCRNL)
++                tios.c_oflag &= ~ONLCR;
++#else
+                 tios.c_oflag &= ~(ONLCR|OCRNL);
++#endif
+                 /*
+                  * turn off canonical processing and character echo;
+                  * also turn off signal checking -- ICANON might be
+@@ -771,9 +815,11 @@
+                 tios.c_cc[VTIME] = 1;
+                 tios.c_cc[VMIN] = 1;
+                 if (eight) tios.c_iflag &= ~(ISTRIP);
++#if defined(TABDLY) && defined(TAB3)
+                 /* preserve tab delays, but turn off tab-to-space expansion */
+                 if ((tios.c_oflag & TABDLY) == TAB3)
+                         tios.c_oflag &= ~TAB3;
++#endif
+                 /*
+                  *  restore current flow control state
+                  */
+@@ -830,8 +876,7 @@
+ usage(void)
+ {
+ 	fprintf(stderr,
+-	    "usage: rlogin [ -%s]%s[-e char] [ -l username ] host\n",
+-	    "8EL", " ");
++	    "usage: rlogin [-8ELKd] [-e char] [-i user] [-l user] [-p port] host\n");
+ 	exit(1);
+ }
+ 
+--- a/rlogind/auth.c
++++ b/rlogind/auth.c
+@@ -33,6 +33,8 @@
+ 
+ #include <sys/types.h>
+ #include <pwd.h>
++#include <stdio.h>
++#include <grp.h>
+ 
+ #include "rlogind.h"
+ 
+@@ -106,11 +108,12 @@
+  * or return 0 on authentication success. Dying is discouraged.
+  */
+ int auth_checkauth(const char *remoteuser, const char *host,
+-		   char *localuser, size_t localusersize) 
++		   char *localuser, size_t localusersize, const char *line)
+ {
+     static struct pam_conv conv = { sock_conv, NULL };
+     struct passwd *pwd;
+-    char *ln;
++    const char *ln;
++    const void *vp;
+     int retval;
+ 
+     retval = pam_start("rlogin", localuser, &conv, &pamh);
+@@ -122,7 +125,7 @@
+     pam_set_item(pamh, PAM_USER, localuser);
+     pam_set_item(pamh, PAM_RUSER, remoteuser);
+     pam_set_item(pamh, PAM_RHOST, host);
+-    pam_set_item(pamh, PAM_TTY, "tty");   /* ? */
++    pam_set_item(pamh, PAM_TTY, line);
+ 	
+     network_confirm();
+     retval = attempt_auth();
+@@ -131,7 +134,8 @@
+ 	return -1;
+     }
+ 
+-    pam_get_item(pamh, PAM_USER, &ln);
++    pam_get_item(pamh, PAM_USER, &vp);
++    ln = vp;
+     if (!ln || !*ln) {
+ 	/*
+ 	 * Authentication wasn't adequate for requirements.
+@@ -204,7 +208,7 @@
+  * or return 0 on authentication success. Dying is discouraged.
+  */
+ int auth_checkauth(const char *remoteuser, const char *host,
+-		   char *localuser, size_t localusersize) 
++		   char *localuser, size_t localusersize, const char *line)
+ {
+     struct passwd *pwd;
+ 
+@@ -236,7 +240,7 @@
+ 
+     _check_rhosts_file = use_rhosts;
+ 
+-    return ruserok(host, pwd->pw_uid==0, remoteuser, localuser);
++    return ruserok_af(host, pwd->pw_uid==0, remoteuser, localuser, AF_UNSPEC);
+ }
+ 
+ #endif /* PAM */
+--- a/rlogind/network.c
++++ b/rlogind/network.c
+@@ -34,6 +34,7 @@
+ #include <sys/param.h>       /* for MAXHOSTNAMELEN */
+ #include <sys/socket.h>
+ #include <netinet/in.h>
++#include <netinet/tcp.h>
+ #include <arpa/inet.h>
+ #include <netdb.h>
+ #include <stdio.h>           /* for snprintf(), BUFSIZ */
+@@ -45,89 +46,73 @@
+ 
+ #include "rlogind.h"
+ 
+-static int confirmed=0;
++int from_af;
++static int confirmed;
+ static int netf;
+ 
+-static const char *
+-topdomain(const char *h)
+-{
+-	const char *p;
+-	const char *maybe = NULL;
+-	int dots = 0;
+-
+-	for (p = h + strlen(h); p >= h; p--) {
+-		if (*p == '.') {
+-			if (++dots == 2)
+-				return (p);
+-			maybe = p;
+-		}
+-	}
+-	return (maybe);
+-}
+-
+-/*
+- * Check whether host h is in our local domain,
+- * defined as sharing the last two components of the domain part,
+- * or the entire domain part if the local domain has only one component.
+- * If either name is unqualified (contains no '.'),
+- * assume that the host is local, as it will be
+- * interpreted as such.
+- */
+-static int
+-local_domain(const char *h)
+-{
+-	char localhost[MAXHOSTNAMELEN];
+-	const char *p1, *p2;
+-
+-	localhost[0] = 0;
+-	(void) gethostname(localhost, sizeof(localhost));
+-	p1 = topdomain(localhost);
+-	p2 = topdomain(h);
+-	if (p1 == NULL || p2 == NULL || !strcasecmp(p1, p2))
+-		return(1);
+-	return(0);
+-}
+-
+ 
+ static char *
+-find_hostname(const struct sockaddr_in *fromp, int *hostokp)
++find_hostname(const struct sockaddr *fromp, socklen_t fromlen, int *hostokp)
+ {
+-	struct hostent *hop;
++	struct addrinfo hints, *res, *res0;
++	char naddr[NI_MAXHOST];
++	char raddr[NI_MAXHOST];
++	char hbuf[NI_MAXHOST];
+ 	char *hname;
+ 	int hostok = 0;
++	struct sockaddr_in v4;
+ 
+-	hop = gethostbyaddr((const char *)&fromp->sin_addr, 
+-			    sizeof(struct in_addr), fromp->sin_family);
+-	if (hop == NULL) {
+-		hname = strdup(inet_ntoa(fromp->sin_addr));
++	if (fromp->sa_family == AF_INET6) {
++		const struct sockaddr_in6 *v6p = (const void *)fromp;
++
++		if (IN6_IS_ADDR_V4MAPPED(&v6p->sin6_addr)) {
++			v4.sin_family = AF_INET;
++			v4.sin_addr.s_addr = v6p->sin6_addr.s6_addr32[3];
++			fromp = (struct sockaddr *)&v4;
++		}
++	}
++
++	if (getnameinfo(fromp, fromlen, hbuf, sizeof(hbuf), NULL, 0,
++			NI_NAMEREQD)) {
++		if (getnameinfo(fromp, fromlen, hbuf, sizeof(hbuf), NULL, 0,
++				NI_NUMERICHOST))
++			strcpy(hbuf, "???");
++		hname = strdup(hbuf);
+ 		hostok = 1;
+ 	} 
+-	else if (check_all || local_domain(hop->h_name)) {
++	else {
+ 		/*
+ 		 * If name returned by gethostbyaddr is in our domain,
+ 		 * attempt to verify that we haven't been fooled by someone
+ 		 * in a remote net; look up the name and check that this
+ 		 * address corresponds to the name.
+ 		 */
+-		hname = strdup(hop->h_name);
+-		hop = gethostbyname(hname);
+-		if (hop) {
+-		    for (; hop->h_addr_list[0]; hop->h_addr_list++) {
+-			if (!memcmp(hop->h_addr_list[0], &fromp->sin_addr,
+-				    sizeof(fromp->sin_addr))) {
+-				hostok = 1;
+-				break;
++		hname = strdup(hbuf);
++		memset(&hints, 0, sizeof(hints));
++		hints.ai_family = fromp->sa_family;
++		hints.ai_socktype = SOCK_STREAM;
++		hints.ai_flags = AI_CANONNAME;
++		if (getaddrinfo(hbuf, NULL, &hints, &res0) == 0) {
++			if (getnameinfo(fromp, fromlen, naddr, sizeof(naddr),
++					NULL, 0, NI_NUMERICHOST))
++				strcpy(naddr, "???");
++			for (res = res0; res; res = res->ai_next) {
++				if (res->ai_family != fromp->sa_family)
++					continue;
++				if (getnameinfo(res->ai_addr, res->ai_addrlen,
++						raddr, sizeof(raddr), NULL, 0,
++						NI_NUMERICHOST) == 0
++				    && strcmp(naddr, raddr) == 0) {
++					free(hname);
++					hname = strdup(res->ai_canonname ?
++						res->ai_canonname : hbuf);
++					hostok = 1;
++					break;
++				}
+ 			}
+-		    }
+-		    /* not clear if this is worthwhile */
+-		    free(hname);
+-		    hname = strdup(hop->h_name);
++			freeaddrinfo(res0);
+ 		}
+ 	} 
+-	else {
+-		hname = strdup(hop->h_name);
+-		hostok = 1;
+-	}
+ 
+ 	/* 
+ 	 * Actually it might be null if we're out of memory, but
+@@ -145,29 +130,42 @@
+ char * 
+ network_init(int f, int *hostokp)
+ {
+-	struct sockaddr_in from, *fromp;
++	union {
++		struct sockaddr_in6 in6;
++		struct sockaddr_in in;
++		struct sockaddr_storage storage;
++		struct sockaddr addr;
++	} from;
++	struct sockaddr *const fromp = &from.addr;
+ 	socklen_t fromlen;
+ 	int on = 1;
+ 	char c;
+ 	char *hname;
+ 	int port;
++	int family;
+ 
+-	from.sin_family = AF_INET;
+ 	fromlen = sizeof (from);
+-	if (getpeername(f, (struct sockaddr *)&from, &fromlen) < 0) {
++	if (getpeername(f, fromp, &fromlen) < 0) {
+ 		syslog(LOG_ERR,"Can't get peer name of remote host: %m");
+ 		fatal(STDERR_FILENO, "Can't get peer name of remote host", 1);
+ 	}
+ 	if (keepalive &&
+ 	    setsockopt(f, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) < 0)
+ 		syslog(LOG_WARNING, "setsockopt (SO_KEEPALIVE): %m");
+-#ifdef IP_TOS
++
++	family = fromp->sa_family;
++
++#if defined(SOL_IP) && defined(IP_TOS)
+ 	#define IPTOS_LOWDELAY          0x10
+ 	on = IPTOS_LOWDELAY;
+-	if (setsockopt(f, IPPROTO_IP, IP_TOS, &on, sizeof(on)) < 0)
++	if (family == AF_INET &&
++	    setsockopt(f, SOL_IP, IP_TOS, &on, sizeof(on)) < 0)
+ 		syslog(LOG_WARNING, "setsockopt (IP_TOS): %m");
+ #endif
+-	fromp = &from;
++	on = 1;
++	if (disable_nagle &&
++	    setsockopt(f, SOL_TCP, TCP_NODELAY, &on, sizeof(on)) < 0)
++		syslog(LOG_WARNING, "setsockopt (TCP_NODELAY): %m");
+ 
+ 	alarm(60);
+ 	read(f, &c, 1);
+@@ -177,18 +175,28 @@
+ 
+ 	alarm(0);
+ 
+-	hname = find_hostname(fromp, hostokp);
++	hname = find_hostname(fromp, fromlen, hostokp);
++
++	switch (family) {
++	case AF_INET:
++		port = from.in.sin_port;
++		break;
++	case AF_INET6:
++		port = from.in6.sin6_port;
++		break;
++	default:
++		syslog(LOG_NOTICE, "Connection with illegal family %d", family);
++		fatal(f, "Permission denied", 0);
++	}
+ 
+-	port = ntohs(fromp->sin_port);
+-	if (fromp->sin_family != AF_INET ||
+-	    port >= IPPORT_RESERVED || port < IPPORT_RESERVED/2) {
+-	    syslog(LOG_NOTICE, "Connection from %s on illegal port",
+-		   inet_ntoa(fromp->sin_addr));
+-	    fatal(f, "Permission denied", 0);
++	port = ntohs(port);
++	if (port >= IPPORT_RESERVED || port < IPPORT_RESERVED/2) {
++		syslog(LOG_NOTICE, "Connection from %s on illegal port", hname);
++		fatal(f, "Permission denied", 0);
+ 	}
+ 
+ #ifdef IP_OPTIONS
+-	{
++	if (family == AF_INET) {
+ 	    u_char optbuf[BUFSIZ/3], *cp;
+ 	    char lbuf[BUFSIZ];
+ 	    int lboff;
+--- a/rlogind/rlogind.8
++++ b/rlogind/rlogind.8
+@@ -40,7 +40,7 @@
+ .Nd remote login server
+ .Sh SYNOPSIS
+ .Nm rlogind
+-.Op Fl ahlLn
++.Op Fl afhlLn
+ .Sh DESCRIPTION
+ .Nm Rlogind
+ is the server for the 
+@@ -52,7 +52,10 @@
+ .Nm rlogind :
+ .Bl -tag -width Ds
+ .It Fl a
+-Ask hostname for verification.
++This option exists for compatibility with historical systems.
++.It Fl f
++Disable the Nagle algorithm.  This is only needed to work around some broken
++operating systems.
+ .It Fl h
+ Permit use of superuser 
+ .Dq Pa .rhosts
+@@ -75,9 +78,7 @@
+ .El
+ .Pp
+ The \-h, \-l, and \-L flags are not used if PAM (Pluggable
+-Authentication Module) support is in use. In this case the same
+-effects can be achieved by editing
+-.Pa /etc/pam.conf .
++Authentication Module) support is in use.
+ .Pp
+ The
+ .Fl h
+@@ -124,12 +125,7 @@
+ .Xr named 8 ) .
+ If the hostname cannot be determined,
+ the dot-notation representation of the host address is used.
+-If the hostname is in the same domain as the server (according to
+-the last two components of the domain name),
+-or if the
+-.Fl a
+-option is given,
+-the addresses for the hostname are requested,
++The addresses for the hostname are requested,
+ verifying that the name and address correspond.
+ Normal authentication is bypassed if the address verification fails.
+ .El
+--- a/rlogind/rlogind.c
++++ b/rlogind/rlogind.c
+@@ -53,7 +53,6 @@
+  */
+ 
+ #include <sys/types.h>   /* for size_t */
+-#include <sys/param.h>   /* for MAXPATHLEN */
+ #include <sys/stat.h>    /* for chmod() */
+ #include <sys/ioctl.h>   /* for TIOCPKT */
+ #include <sys/time.h>    /* for FD_SET() et al. */
+@@ -63,6 +62,8 @@
+ #include <arpa/inet.h>   /* for ntohs() */
+ #include <stdio.h>       /* for EOF, BUFSIZ, snprintf() */
+ #include <syslog.h>      /* for syslog() */
++#include <pty.h>         /* for openpty() */
++#include <utmp.h>        /* for login_tty() */
+ #include <errno.h>
+ #include <unistd.h>
+ #include <stdlib.h>
+@@ -72,21 +73,18 @@
+ #include "logwtmp.h"
+ #include "rlogind.h"
+ 
+-pid_t forkpty(int *, char *, struct termios *, struct winsize *);
+-int logout(const char *);
+-
+ #ifndef TIOCPKT_WINDOW
+ #define TIOCPKT_WINDOW 0x80
+ #endif
+ 
+ int keepalive = 1;
+-int check_all = 0;
+ int use_rhosts = 1;
+-int allow_root_rhosts = 0;
+-int deny_all_rhosts_hequiv = 0;
++int allow_root_rhosts;
++int deny_all_rhosts_hequiv;
++int disable_nagle;
+ 
+ static char oobdata[] = {(char)TIOCPKT_WINDOW};
+-static char line[MAXPATHLEN];
++static char *line;
+ struct winsize win = { 0, 0, 0, 0 };
+ 
+ 
+@@ -381,6 +379,7 @@
+ 
+ static void doit(int netfd) {
+     int master, pid, on = 1;
++    int slave;
+     int authenticated = 0;
+     char *hname;
+     int hostok;
+@@ -391,6 +390,12 @@
+     getstr(rusername, sizeof(rusername), "remuser too long");
+     getstr(lusername, sizeof(lusername), "locuser too long");
+     getstr(termtype, sizeof(termtype), "Terminal type too long");
++
++    if (openpty(&master, &slave, 0, 0, &win) != 0) {
++	if (errno == ENOENT) fatal(netfd, "Out of ptys", 0);
++	fatal(netfd, "Openpty", 1);
++    }
++    line = ttyname(slave);
+     
+     /*
+      * This function will either die, return -1 if authentication failed,
+@@ -402,7 +407,7 @@
+      */
+     if (hostok) {
+ 	if (auth_checkauth(rusername, hname, 
+-			   lusername, sizeof(lusername)) == 0) {
++			   lusername, sizeof(lusername), line) == 0) {
+ 	   authenticated=1;
+ 	}
+     }
+@@ -412,16 +417,19 @@
+ 	write(netfd, "rlogind: Host address mismatch.\r\n", 33);
+     }
+ 
+-    pid = forkpty(&master, line, NULL, &win);
+-    if (pid < 0) {
+-	if (errno == ENOENT) fatal(netfd, "Out of ptys", 0);
+-	fatal(netfd, "Forkpty", 1);
++    if ((pid = fork()) < 0) {
++	fatal(netfd, "Fork", 1);
+     }
+     if (pid == 0) {
++	close(master);
++	if (login_tty(slave)) {
++	    fatal(netfd, "Login_tty", 1);
++	}
+ 	/* netfd should always be 0, but... */ 
+ 	if (netfd > 2) close(netfd);
+ 	child(hname, termtype, lusername, authenticated);
+     }
++    close(slave);
+     on = 1;
+     ioctl(netfd, FIONBIO, &on);
+     ioctl(master, FIONBIO, &on);
+@@ -434,14 +442,14 @@
+ 
+ int main(int argc, char **argv) {
+     int ch;
+-    use_rhosts = 1;     /* default */
+ 
+     openlog("rlogind", LOG_PID | LOG_CONS, LOG_AUTH);
+ 
+     opterr = 0;
+-    while ((ch = getopt(argc, argv, "ahLln")) != EOF) {
++    while ((ch = getopt(argc, argv, "afhLln")) != EOF) {
+ 	switch (ch) {
+-	    case 'a': check_all = 1; break;
++	    case 'a': break;
++	    case 'f': disable_nagle = 1; break;
+ 	    case 'h': allow_root_rhosts = 1; break;
+ 	    case 'L': deny_all_rhosts_hequiv = 1; break;
+ 	    case 'l': use_rhosts = 0; break;
+--- a/rlogind/rlogind.h
++++ b/rlogind/rlogind.h
+@@ -1,6 +1,6 @@
+ 
+ /* rlogind.c */
+-void fatal(int f, const char *msg, int syserr);
++void fatal(int f, const char *msg, int syserr) __attribute__ ((__noreturn__));
+ 
+ /* network.c */
+ char *network_init(int fd, int *hostokp);
+@@ -12,15 +12,12 @@
+ void auth_checkoptions(void);
+ void auth_finish(void);
+ int auth_checkauth(const char *remoteuser, const char *host,
+-		   char *localuser, size_t localusermaxsize);
++		   char *localuser, size_t localusermaxsize, const char *line);
+ 
+ /* 
+  * Global flag variables 
+  */
+ 
+-/* Do paranoid DNS confirmation on all hosts? */
+-extern int check_all;
+-
+ /* Use TCP keepalive messages on connection? */
+ extern int keepalive;
+ 
+@@ -32,3 +29,6 @@
+ 
+ /* Ignore all ~/.rhosts and /etc/hosts_equiv? */
+ extern int deny_all_rhosts_hequiv;
++
++/* Disable Nagle algorithm? */
++extern int disable_nagle;
+--- a/rsh/pathnames.h
++++ b/rsh/pathnames.h
+@@ -34,4 +34,4 @@
+  *	$Id: pathnames.h,v 1.1 1996/07/15 19:58:37 dholland Exp $
+  */
+ 
+-#define	_PATH_RLOGIN	"/usr/bin/rlogin"
++#define	_PATH_RLOGIN	"/usr/bin/netkit-rlogin"
+--- a/rsh/rsh.1
++++ b/rsh/rsh.1
+@@ -74,15 +74,6 @@
+ on the
+ .Tn TCP
+ sockets used for communication with the remote host.
+-.It Fl k
+-The
+-.Fl k
+-option causes
+-.Nm rsh
+-to obtain tickets for the remote host in
+-.Ar realm
+-instead of the remote host's realm as determined by
+-.Xr krb_realmofhost  3  .
+ .It Fl l
+ By default, the remote username is the same as the local username.
+ The
+@@ -99,13 +90,6 @@
+ (see the
+ .Sx BUGS
+ section of this manual page).
+-.It Fl x
+-The
+-.Fl x
+-option turns on
+-.Tn DES
+-encryption for all data exchange.
+-This may introduce a significant delay in response time.
+ .El
+ .Pp
+ If no
+--- a/rsh/rsh.c
++++ b/rsh/rsh.c
+@@ -47,6 +47,9 @@
+ #include <sys/ioctl.h>
+ #include <sys/file.h>
+ #include <sys/time.h>
++#if defined(linux) && defined(FSUID_HACK)
++#include <sys/fsuid.h>
++#endif
+ 
+ #include <netinet/in.h>
+ #include <netdb.h>
+@@ -92,7 +95,11 @@
+ 	if (p) p++;
+ 	else p = argv[0];
+ 
++#ifdef debian
++	if (!strcmp(p, "rsh") || !strcmp(p, "netkit-rsh")) asrsh = 1;
++#else
+ 	if (!strcmp(p, "rsh")) asrsh = 1;
++#endif
+ 	else host = p;
+ 
+ 	/* handle "rsh host flags" */
+@@ -163,7 +170,14 @@
+ 		exit(1);
+ 	}
+ 
+-	rem = rcmd(&host, sp->s_port, pw->pw_name, user, args, &rfd2);
++#if defined(linux) && defined(FSUID_HACK)
++	setfsuid(getuid());
++#endif
++	rem = rcmd_af(&host, sp->s_port, pw->pw_name, user, args, &rfd2,
++		      AF_UNSPEC);
++#if defined(linux) && defined(FSUID_HACK)
++	setfsuid(geteuid());
++#endif
+ 
+ 	if (rem < 0)
+ 		exit(1);
+--- a/rshd/rshd.8
++++ b/rshd/rshd.8
+@@ -40,7 +40,7 @@
+ .Nd remote shell server
+ .Sh SYNOPSIS
+ .Nm rshd
+-.Op Fl ahlnL
++.Op Fl an
+ .Sh DESCRIPTION
+ The
+ .Nm rshd
+@@ -117,30 +117,15 @@
+ .It
+ .Nm Rshd
+ then validates the user using
+-.Xr ruserok 3 ,
++.Nm PAM ,
+ which uses the file
+ .Pa /etc/hosts.equiv
+ and the
+ .Pa .rhosts
+-file found in the user's home directory. The
+-.Fl l
+-option prevents
+-.Xr ruserok 3
+-from doing any validation based on the user's ``.rhosts'' file
+-(unless the user is the superuser and the 
+-.Fl h 
+-option is used.) If the
+-.Fl h
+-option is not used, superuser accounts may not be accessed via this
+-service at all.
+-.Pp
+-The
+-.Fl l
+-option should not be trusted without verifying that it works as
+-expected with the particular version of libc installed on your system
+-(and should be tested again after any libc update) because some
+-versions of libc may not honor the flags used by
+-.Nm rshd .
++file found in the user's home directory.  Due to the way the protocol was
++designed, it is not possible to exchange information other than those
++specified here for authentication.  Thus PAM authentication modules such as
++pam_unix should not be used with this service.
+ .Pp
+ Also note that the design of the
+ .Pa .rhosts
+@@ -163,15 +148,6 @@
+ option is present.
+ The use of keepalive messages allows sessions to be timed out
+ if the client crashes or becomes unreachable.
+-.Pp
+-The 
+-.Fl L
+-option causes all successful accesses to be logged to
+-.Xr syslogd 8
+-as
+-.Li auth.info
+-messages and all failed accesses to be logged as
+-.Li auth.notice .
+ .Sh DIAGNOSTICS
+ Except for the last one listed below,
+ all diagnostic messages
+@@ -214,7 +190,7 @@
+ .Sh SEE ALSO
+ .Xr rsh 1 ,
+ .Xr rcmd 3 ,
+-.Xr ruserok 3
++.Xr pam 8
+ .Sh BUGS
+ The authentication procedure used here assumes the integrity
+ of each client machine and the connecting medium.  This is
+--- a/rshd/rshd.c
++++ b/rshd/rshd.c
+@@ -79,6 +79,7 @@
+ #include <stdarg.h>
+ #include <ctype.h>
+ #include <assert.h>
++#include <limits.h>
+ 
+ #if defined(__GLIBC__) && (__GLIBC__ >= 2)
+ #define _check_rhosts_file  __check_rhosts_file
+@@ -107,8 +108,11 @@
+ extern	char	**environ;
+ 
+ static void error(const char *fmt, ...);
+-static void doit(struct sockaddr_in *fromp);
+-static void getstr(char *buf, int cnt, const char *err);
++static void doit(struct sockaddr *fromp, socklen_t fromlen);
++static char *getstr(char *, size_t, const char *);
++static int err_conv(
++	int, const struct pam_message **, struct pam_response **, void *
++);
+ 
+ extern int _check_rhosts_file;
+ 
+@@ -145,16 +149,45 @@
+ 	exit(1);
+ }
+ 
+-static void getstr(char *buf, int cnt, const char *err) {
+-    char c;
+-    do {
+-	if (read(0, &c, 1) != 1) exit(1);
+-	*buf++ = c;
+-	if (--cnt == 0) {
+-	    error("%s too long\n", err);
+-	    exit(1);
+-	}
+-    } while (c != 0);
++static char *getstr(char *buf, size_t cnt, const char *err) {
++	char *p;
++	char *end;
++	size_t len;
++
++	end = p = buf;
++	len = cnt;
++	if (p) {
++		end += len;
++		goto read;
++	}
++	if (!len)
++		len = 64;
++	goto alloc;
++
++	do {
++		if (p == end) {
++			size_t n;
++
++			if (cnt || len * 2 < len) {
++				error("%s too long\n", err);
++				exit(1);
++			}
++			len *= 2;
++alloc:
++			n = p - buf;
++			buf = realloc(buf, len);
++			if (!buf) {
++				error("realloc: %s\n", strerror(errno));
++				exit(1);
++			}
++			p = buf + n;
++			end = buf + len;
++		}
++read:
++		if (read(0, p, 1) != 1)
++			exit(1);
++	} while (*p++);
++	return buf;
+ }
+ 
+ static int getint(void) {
+@@ -223,12 +256,23 @@
+ }
+ 
+ 
++static int err_conv(
++	int num_msg, const struct pam_message **msg,
++	struct pam_response **resp, void *appdata_ptr
++) {
++	(void) num_msg;
++	(void) msg;
++	(void) resp;
++	(void) appdata_ptr;
++	return PAM_CONV_ERR;
++}
++
+ static struct passwd *doauth(const char *remuser, 
+ 			     const char *hostname, 
+ 			     const char *locuser)
+ {
+ #ifdef USE_PAM
+-    static struct pam_conv conv = { misc_conv, NULL };
++    static struct pam_conv conv = { err_conv, NULL };
+     int retcode;
+ #endif
+     struct passwd *pwd = getpwnam(locuser);
+@@ -275,26 +319,43 @@
+     return pwd;
+ #else
+     if (pwd->pw_uid==0 && !allow_root_rhosts) return NULL;
+-    if (ruserok(hostname, pwd->pw_uid==0, remuser, locuser) < 0) {
++    if (ruserok_af(hostname, pwd->pw_uid==0, remuser, locuser, AF_UNSPEC) < 0) {
+ 	return NULL;
+     }
+     return pwd;
+ #endif
+ }
+ 
+-static const char *findhostname(struct sockaddr_in *fromp,
++static const char *findhostname(struct sockaddr *fromp, socklen_t fromlen,
+ 				const char *remuser, const char *locuser,
+ 				const char *cmdbuf) 
+ {
+-	struct hostent *hp;
+ 	const char *hostname;
++	char hbuf[NI_MAXHOST];
++	char naddr[NI_MAXHOST];
++	char raddr[NI_MAXHOST];
++	struct addrinfo hints, *res, *res0;
++	int gaierr;
++	struct sockaddr_in v4;
++
++	if (fromp->sa_family == AF_INET6) {
++		const struct sockaddr_in6 *v6p = (const void *)fromp;
++
++		if (IN6_IS_ADDR_V4MAPPED(&v6p->sin6_addr)) {
++			v4.sin_family = AF_INET;
++			v4.sin_addr.s_addr = v6p->sin6_addr.s6_addr32[3];
++			fromp = (struct sockaddr *)&v4;
++		}
++	}
+ 
+-	hp = gethostbyaddr((char *)&fromp->sin_addr, sizeof (struct in_addr),
+-			   fromp->sin_family);
++	if ((gaierr = getnameinfo(fromp, fromlen, hbuf, sizeof(hbuf),
++				  NULL, 0, 0))) {
++		error("getnameinfo: %s\n", gai_strerror(gaierr));
++		exit(1);
++	}
+ 
+ 	errno = ENOMEM; /* malloc (thus strdup) may not set it */
+-	if (hp) hostname = strdup(hp->h_name);
+-	else hostname = strdup(inet_ntoa(fromp->sin_addr));
++	hostname = strdup(hbuf);
+ 
+ 	if (hostname==NULL) {
+ 	    /* out of memory? */
+@@ -302,36 +363,46 @@
+ 	    exit(1);
+ 	}
+ 
+-	/*
+-	 * Attempt to confirm the DNS. 
+-	 */
+-#ifdef	RES_DNSRCH
+-	_res.options &= ~RES_DNSRCH;
+-#endif
+-	hp = gethostbyname(hostname);
+-	if (hp == NULL) {
+-	    syslog(LOG_INFO, "Couldn't look up address for %s", hostname);
+-	    fail("Couldn't get address for your host (%s)\n", 
+-		 remuser, inet_ntoa(fromp->sin_addr), locuser, cmdbuf);
+-	} 
+-	while (hp->h_addr_list[0] != NULL) {
+-	    if (!memcmp(hp->h_addr_list[0], &fromp->sin_addr,
+-			sizeof(fromp->sin_addr))) {
+-		return hostname;
+-	    }
+-	    hp->h_addr_list++;
++	memset(&hints, 0, sizeof(hints));
++	hints.ai_family = fromp->sa_family;
++	hints.ai_socktype = SOCK_STREAM;
++	hints.ai_flags = AI_CANONNAME;
++	if ((gaierr = getaddrinfo(hbuf, NULL, &hints, &res0))) {
++		syslog(LOG_INFO, "Couldn't look up address for %s: %s",
++		       hbuf, gai_strerror(gaierr));
++		fail("Couldn't get address for your host (%s)\n",
++		     remuser, hbuf, locuser, cmdbuf);
++	} else {
++		if (getnameinfo(fromp, fromlen, naddr, sizeof(naddr),
++				NULL, 0, NI_NUMERICHOST))
++			strcpy(naddr, "???");
++		for (res = res0; res; res = res->ai_next) {
++			if (res->ai_family != fromp->sa_family)
++				continue;
++			if (getnameinfo(res->ai_addr, res->ai_addrlen,
++					raddr, sizeof(raddr), NULL, 0,
++					NI_NUMERICHOST) == 0
++			    && strcmp(naddr, raddr) == 0) {
++				break;  /* match */
++			}
++		}
++		if (res) {
++			freeaddrinfo(res0);
++			return hostname;
++		}
+ 	}
+ 	syslog(LOG_NOTICE, "Host addr %s not listed for host %s",
+-	       inet_ntoa(fromp->sin_addr), hp->h_name);
++	       naddr, res0->ai_canonname ? res0->ai_canonname : "???");
++	freeaddrinfo(res0);
+ 	fail("Host address mismatch for %s\n", 
+-	     remuser, inet_ntoa(fromp->sin_addr), locuser, cmdbuf);
++	     remuser, naddr, locuser, cmdbuf);
+ 	return NULL; /* not reachable */
+ }
+ 
+ static void
+-doit(struct sockaddr_in *fromp)
++doit(struct sockaddr *fromp, socklen_t fromlen)
+ {
+-	char cmdbuf[ARG_MAX+1];
++	char *cmdbuf;
+ 	const char *theshell, *shellname;
+ 	char locuser[16], remuser[16];
+ 	struct passwd *pwd;
+@@ -339,6 +410,14 @@
+ 	const char *hostname;
+ 	u_short port;
+ 	int pv[2], pid, ifd;
++	const int family = fromp->sa_family;
++	union {
++		struct sockaddr_in in;
++		struct sockaddr_in6 in6;
++	} *const u = (void *)fromp;
++#ifdef USE_PAM
++	char **pam_envlist;
++#endif
+ 
+ 	signal(SIGINT, SIG_DFL);
+ 	signal(SIGQUIT, SIG_DFL);
+@@ -350,7 +429,7 @@
+ 
+ 	if (port != 0) {
+ 		int lport = IPPORT_RESERVED - 1;
+-		sock = rresvport(&lport);
++		sock = rresvport_af(&lport, family);
+ 		if (sock < 0) {
+ 		    syslog(LOG_ERR, "can't get stderr port: %m");
+ 		    exit(1);
+@@ -359,9 +438,12 @@
+ 		    syslog(LOG_ERR, "2nd port not reserved\n");
+ 		    exit(1);
+ 		}
+-		fromp->sin_port = htons(port);
+-		if (connect(sock, (struct sockaddr *)fromp,
+-			    sizeof(*fromp)) < 0) {
++		port = htons(port);
++		if (family == AF_INET6)
++			u->in.sin_port = port;
++		else
++			u->in6.sin6_port = port;
++		if (connect(sock, fromp, fromlen) < 0) {
+ 		    syslog(LOG_INFO, "connect second port: %m");
+ 		    exit(1);
+ 		}
+@@ -376,10 +458,14 @@
+ 
+ 	getstr(remuser, sizeof(remuser), "remuser");
+ 	getstr(locuser, sizeof(locuser), "locuser");
+-	getstr(cmdbuf, sizeof(cmdbuf), "command");
++#ifdef ARG_MAX
++	cmdbuf = getstr(0, ARG_MAX + 1, "command");
++#else
++	cmdbuf = getstr(0, 0, "command");
++#endif
+ 	if (!strcmp(locuser, "root")) paranoid = 1;
+ 
+-	hostname = findhostname(fromp, remuser, locuser, cmdbuf);
++	hostname = findhostname(fromp, fromlen, remuser, locuser, cmdbuf);
+ 
+ 	setpwent();
+ 	pwd = doauth(remuser, hostname, locuser);
+@@ -473,6 +559,11 @@
+ 	else shellname = theshell;
+ 
+ 	endpwent();
++#ifdef USE_PAM
++	pam_envlist = pam_getenvlist(pamh);
++	while (*pam_envlist)
++		putenv(*pam_envlist++);
++#endif
+ 	if (paranoid) {
+ 	    syslog(LOG_INFO|LOG_AUTH, "%s@%s as %s: cmd='%s'",
+ 		   remuser, hostname, locuser, cmdbuf);
+@@ -489,18 +580,22 @@
+ 	exit(1);
+ }
+ 
+-static void network_init(int fd, struct sockaddr_in *fromp)
++static void network_init(int fd, struct sockaddr *fromp, socklen_t *fromlen)
+ {
+ 	struct linger linger;
+-	socklen_t fromlen;
+ 	int on=1;
+ 	int port;
++	int family;
++	union {
++		struct sockaddr_in in;
++		struct sockaddr_in6 in6;
++	} *const u = (void *)fromp;
+ 
+-	fromlen = sizeof(*fromp);
+-	if (getpeername(fd, (struct sockaddr *) fromp, &fromlen) < 0) {
++	if (getpeername(fd, fromp, fromlen) < 0) {
+ 		syslog(LOG_ERR, "getpeername: %m");
+ 		_exit(1);
+ 	}
++	family = fromp->sa_family;
+ 	if (keepalive &&
+ 	    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (char *)&on,
+ 	    sizeof(on)) < 0)
+@@ -511,13 +606,12 @@
+ 	    sizeof (linger)) < 0)
+ 		syslog(LOG_WARNING, "setsockopt (SO_LINGER): %m");
+ 
+-	if (fromp->sin_family != AF_INET) {
+-	    syslog(LOG_ERR, "malformed \"from\" address (af %d)\n",
+-		   fromp->sin_family);
++	if (family != AF_INET && family != AF_INET6) {
++	    syslog(LOG_ERR, "malformed \"from\" address (af %d)\n", family);
+ 	    exit(1);
+ 	}
+ #ifdef IP_OPTIONS
+-      {
++      if (family == AF_INET) {
+ 	u_char optbuf[BUFSIZ/3], *cp;
+ 	char lbuf[BUFSIZ+1], *lp;
+ 	socklen_t optsize = sizeof(optbuf);
+@@ -528,7 +622,7 @@
+ 		ipproto = ip->p_proto;
+ 	else
+ 		ipproto = IPPROTO_IP;
+-	if (!getsockopt(0, ipproto, IP_OPTIONS, (char *)optbuf, &optsize) &&
++	if (!getsockopt(fd, ipproto, IP_OPTIONS, (char *)optbuf, &optsize) &&
+ 	    optsize != 0) {
+ 		lp = lbuf;
+ 
+@@ -543,9 +637,9 @@
+ 		syslog(LOG_NOTICE,
+ 		       "Connection received from %s using IP options"
+ 		       " (ignored): %s",
+-		       inet_ntoa(fromp->sin_addr), lbuf);
++		       inet_ntoa(u->in.sin_addr), lbuf);
+ 
+-		if (setsockopt(0, ipproto, IP_OPTIONS, NULL, optsize) != 0) {
++		if (setsockopt(fd, ipproto, IP_OPTIONS, NULL, optsize) != 0) {
+ 			syslog(LOG_ERR, "setsockopt IP_OPTIONS NULL: %m");
+ 			exit(1);
+ 		}
+@@ -556,11 +650,16 @@
+ 	/*
+ 	 * Check originating port for validity.
+ 	 */
+-	port = ntohs(fromp->sin_port);
++	if (family == AF_INET6)
++		port = u->in6.sin6_port;
++	else
++		port = u->in.sin_port;
++	port = ntohs(port);
+ 	if (port >= IPPORT_RESERVED || port < IPPORT_RESERVED/2) {
+-	    syslog(LOG_NOTICE|LOG_AUTH, "Connection from %s on illegal port",
+-		   inet_ntoa(fromp->sin_addr));
+-	    exit(1);
++		syslog(LOG_NOTICE|LOG_AUTH,
++		       "Connection from %s on illegal port",
++		       findhostname(fromp, *fromlen, "", "", "") ?: "???");
++		exit(1);
+ 	}
+ }
+ 
+@@ -568,7 +667,11 @@
+ main(int argc, char *argv[])
+ {
+ 	int ch;
+-	struct sockaddr_in from;
++	union {
++		struct sockaddr_storage storage;
++		struct sockaddr addr;
++	} from;
++	socklen_t fromlen;
+ 	_check_rhosts_file=1;
+ 
+ 	openlog("rshd", LOG_PID | LOG_ODELAY, LOG_DAEMON);
+@@ -611,8 +714,9 @@
+                                "pam_rhosts_auth in /etc/pam.conf");
+ #endif /* USE_PAM */
+ 
+-	network_init(0, &from);
+-	doit(&from);
++	fromlen = sizeof(from);
++	network_init(0, &from.addr, &fromlen);
++	doit(&from.addr, fromlen);
+ 	return 0;
+ }
+ 

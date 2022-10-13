@@ -1,0 +1,29 @@
+Author: Reiner Herrmann <reiner@reiner-h.de>
+Description: Fix FTBFS with gcc 9
+ Use target_link_libraries instead of manually setting linker flags,
+ which will correctly invoke the compiler.
+Bug-Debian: https://bugs.debian.org/925786
+
+--- a/rexecd/CMakeLists.txt
++++ b/rexecd/CMakeLists.txt
+@@ -1,9 +1,4 @@
+ 
+-if(USE_PAM)
+-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_PAM")
+-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lpam -lpam_misc")
+-endif()
+-
+ if(USE_SHADOW)
+     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_SHADOW")
+     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${LIBSHADOW}")
+@@ -18,6 +13,10 @@
+     in.rexecd
+     rexecd.c
+ )
++if(USE_PAM)
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_PAM")
++    target_link_libraries(in.rexecd pam pam_misc)
++endif()
+ install(
+     TARGETS in.rexecd
+     DESTINATION ${SBIN_DIR}

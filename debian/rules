@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+
+export CFLAGS += -Ddebian -DFSUID_HACK -D_GNU_SOURCE
+
+%:
+	dh $@ --buildsystem=cmake
+
+override_dh_fixperms:
+	dh_fixperms
+	chmod u+s \
+		debian/rsh-client/usr/bin/netkit-rcp \
+		debian/rsh-client/usr/bin/netkit-rlogin \
+		debian/rsh-client/usr/bin/netkit-rsh
+
+override_dh_missing:
+	dh_missing --fail-missing
